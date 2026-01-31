@@ -1,0 +1,185 @@
+# RKE2 HA Manual Installation + Rancher Integration (All-in-One Guide)
+
+**Last updated:** January 2026  
+**Goal:** Set up a production-grade High-Availability RKE2 Kubernetes cluster manually, then import it into Rancher Manager UI for centralized management.  
+
+RKE2 is Rancher's hardened, secure Kubernetes distribution — great for on-prem, air-gapped, or Rancher-managed environments.
+
+## Prerequisites
+
+- **Nodes** — odd number for HA control-plane (etcd quorum):  
+  - 3+ server nodes (control-plane)  
+  - 3+ agent/worker nodes  
+  - Min specs per server: 2 vCPU, 8 GB RAM, 50 GB disk (more for prod)  
+- **OS** — Ubuntu 22.04/24.04, Rocky/AlmaLinux 9, etc. (root/sudo access)  
+- **Networking** —  
+  - Disable swap: `swapoff -a` + comment in `/etc/fstab`  
+  - Unique hostnames: `hostnamectl set-hostname node1.example.local`  
+  - Open ports:  
+    - 6443/TCP (Kubernetes API)  
+    - 9345/TCP (RKE2 node registration — servers only)  
+    - 2379-2380/TCP (etcd peer, if external not used)  
+    - 10250/TCP (Kubelet metrics)  
+    - CNI-specific (Calico: 179, 4789/UDP; Cilium: varies)  
+  - Recommended: External LB (HAProxy, MetalLB, cloud NLB) for API at a single endpoint (e.g., `https://k8s-api.example.com:6443`)  
+- **Firewall** — `systemctl disable --now firewalld` or `ufw disable` (or allow ports)  
+- **SELinux** — `setenforce 0` or permissive (RKE2 is compatible)  
+
+## 1. Full Cleanup / Reset (clean.sh)
+
+Run on **every node** before install (or after failed attempts).
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Stopping RKE2..."
+systemctl stop rke2-server rke2-agent || true
+systemctl disable rke2-server rke2-agent || true
+
+pkill -f rke2 || true
+
+echo "Uninstall scripts if exist..."
+/usr/local/bin/rke2-uninstall.sh || true
+/usr/local/bin/rke2-agent-uninstall.sh || true
+
+echo "Removing files..."
+rm -rf /etc/rancher /var/lib/rancher /var/lib/kubelet /var/lib/cni \
+       /var/lib/containerd /etc/cni /opt/cni /etc/containerd \
+       /var/log/containers /etc/systemd/system/rke2* \
+       /usr/local/bin/rke2* /usr/local/bin/kubectl* /usr/local/bin/crictl /usr/local/bin/ctr
+
+echo "Network cleanup..."
+ip link delete cilium* cali* tunl* vxlan.calico || true
+iptables -F && iptables -X && iptables -t nat -F && iptables -t nat -X && iptables -t mangle -F && iptables -t mangle -X
+iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT
+
+echo "Cleanup done. Reboot now:"
+echo "sudo reboot"
+# sudo reboot  # Uncomment for auto
+
+
+
+##**3. Install First Server Node (Initializes Cluster)**
+Save as install-first-server.sh
+Important: Do not set token: → let RKE2 auto-generate it.
+#!/usr/bin/env bash
+set -euo pipefail
+
+# === Customize these ===
+LB_OR_IP="192.168.10.10"                  # This node's IP or future LB IP
+EXTRA_SAN="api.cluster.example.com"       # Add LB DNS/IPs, comma-separated if multiple
+CNI="calico"                              # calico (default), canal, cilium
+
+curl -sfL https://get.rke2.io | INSTALL_RKE2_CHANNEL=stable sh -
+
+mkdir -p /etc/rancher/rke2
+cat <<EOF > /etc/rancher/rke2/config.yaml
+node-ip: ${LB_OR_IP}
+tls-san:
+  - "${LB_OR_IP}"
+  - ${EXTRA_SAN}
+cni: ${CNI}
+write-kubeconfig-mode: "0644"
+# token: is NOT set → auto-generated on first start
+EOF
+
+systemctl enable rke2-server
+systemctl start rke2-server
+
+echo "Waiting for initialization (2–5 minutes)..."
+sleep 180
+
+echo "=== Cluster status ==="
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+/var/lib/rancher/rke2/bin/kubectl get nodes -o wide
+/var/lib/rancher/rke2/bin/kubectl get pods -A
+
+echo ""
+echo "=== IMPORTANT: Copy this token for joining other nodes ==="
+echo "cat /var/lib/rancher/rke2/server/node-token"
+cat /var/lib/rancher/rke2/server/node-token
+echo ""
+echo "Save the above token securely — you'll need it for all other nodes!"
+
+
+
+
+
+**3. Join Additional Server Nodes (HA Control-Plane)**
+#!/usr/bin/env bash
+set -euo pipefail
+
+# === Customize ===
+FIRST_SERVER="https://192.168.10.10:9345"   # First server IP or LB
+JOIN_TOKEN="K10your-long-token-here::server:short-hash"   # From first node!
+THIS_NODE_IP="192.168.10.11"                # This node's IP
+EXTRA_SAN="api.cluster.example.com"
+
+curl -sfL https://get.rke2.io | INSTALL_RKE2_CHANNEL=stable sh -
+
+mkdir -p /etc/rancher/rke2
+cat <<EOF > /etc/rancher/rke2/config.yaml
+server: ${FIRST_SERVER}
+token: ${JOIN_TOKEN}
+node-ip: ${THIS_NODE_IP}
+tls-san:
+  - "${THIS_NODE_IP}"
+  - ${EXTRA_SAN}
+cni: calico
+write-kubeconfig-mode: "0644"
+EOF
+
+systemctl enable rke2-server
+systemctl start rke2-server
+
+echo "Additional server started. Check on first node: kubectl get nodes"
+
+
+
+**4. Join Worker / Agent Nodes**
+Save as join-agent.sh
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+# === Customize ===
+FIRST_SERVER="https://192.168.10.10:9345"
+JOIN_TOKEN="K10your-long-token-here::server:short-hash"
+THIS_NODE_IP="$(hostname -I | awk '{print $1}')"
+
+curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE=agent INSTALL_RKE2_CHANNEL=stable sh -
+
+mkdir -p /etc/rancher/rke2
+cat <<EOF > /etc/rancher/rke2/config.yaml
+server: ${FIRST_SERVER}
+token: ${JOIN_TOKEN}
+node-ip: ${THIS_NODE_IP}
+EOF
+
+systemctl enable rke2-agent
+systemctl start rke2-agent
+
+echo "Agent joined. Verify on server: kubectl get nodes"
+
+
+
+**5. Verification (on any server node)**
+Bashexport KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+alias k=/var/lib/rancher/rke2/bin/kubectl
+
+k get nodes -o wide
+k get pods -A
+journalctl -u rke2-server -f   # or rke2-agent
+All nodes Ready + system pods Running → success!
+
+
+**6. Import into Rancher Manager UI**
+
+In Rancher → ☰ > Cluster Management > Import Existing > Generic
+Name the cluster (e.g. my-rke2-prod)
+Click Create → Rancher gives you a YAML URL or command like:Bashcurl --insecure -sfL https://rancher.your-domain/v3/import/abc123.yaml | kubectl apply -f -
+On one RKE2 server node, run the command (use --kubeconfig /etc/rancher/rke2/rke2.yaml if needed):Bashcurl --insecure -sfL <RANCHER_IMPORT_URL> | /var/lib/rancher/rke2/bin/kubectl apply -f -
+Wait 1–3 min → cluster becomes Active in Rancher.
+
+Rancher deploys agents; now manage via UI (apps, monitoring, upgrades, etc.).
