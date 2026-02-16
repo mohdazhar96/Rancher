@@ -1,0 +1,213 @@
+
+step1: Run the below script (on internet access vm) to downlaod the artifacts 
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#!/bin/bash
+VERSION="v1.32.2+rke2r1"
+mkdir -p rke2-artifacts && cd rke2-artifacts
+
+# Download the ARCHIVE (Required for install.sh to create systemd files)
+curl -LO "https://github.com/rancher/rke2/releases/download/${VERSION}/rke2.linux-amd64.tar.gz"
+
+# Download Images
+curl -LO "https://github.com/rancher/rke2/releases/download/${VERSION}/rke2-images.linux-amd64.tar.zst"
+
+# Download Script
+curl -sfL https://get.rke2.io --output install.sh
+
+# Download Checksums (Installer uses this to verify the tarball)
+curl -LO "https://github.com/rancher/rke2/releases/download/${VERSION}/sha256sum-amd64.txt"
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+step2: transfer the ouptuts of step1 to the isolated vm
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+step3: run the below script on the master node
+
+#!/bin/bash
+# Run as root inside the folder containing:
+# rke2.linux-amd64.tar.gz, rke2-images.linux-amd64.tar.zst, install.sh, sha256sum-amd64.txt
+
+ARTIFACT_DIR=$(pwd)
+
+# 1. Stage the images first
+mkdir -p /var/lib/rancher/rke2/agent/images/
+cp "${ARTIFACT_DIR}/rke2-images.linux-amd64.tar.zst" /var/lib/rancher/rke2/agent/images/
+
+# 2. Run the installer (Crucial: Define TYPE and ARTIFACT_PATH)
+INSTALL_RKE2_TYPE="server" \
+INSTALL_RKE2_ARTIFACT_PATH=${ARTIFACT_DIR} \
+sh install.sh
+
+# 3. Create config so the service starts correctly
+mkdir -p /etc/rancher/rke2/
+echo "write-kubeconfig-mode: \"0644\"" > /etc/rancher/rke2/config.yaml
+
+# 4. Reload systemd (just in case) and start
+systemctl daemon-reload
+systemctl enable rke2-server.service
+systemctl start rke2-server.service
+
+echo "Checking status..."
+systemctl status rke2-server --no-pager
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+step4: run the below script on worker node (specify the master node iP and the cluster token)(token can be find from master node in location cat /var/lib/rancher/rke2/server/node-token)
+
+#!/bin/bash
+# Run as root inside the rke2-setup folder
+# Usage: sudo ./install-worker.sh <MASTER_IP> <CLUSTER_TOKEN>
+
+MASTER_IP=$1
+CLUSTER_TOKEN=$2
+
+if [ -z "$MASTER_IP" ] || [ -z "$CLUSTER_TOKEN" ]; then
+    echo "Error: Please provide Master IP and Token."
+    echo "Usage: sudo $0 192.168.1.10 K10234...::server:abc123"
+    exit 1
+fi
+
+ARTIFACT_DIR=$(pwd)
+
+echo "Setting up Worker Node for RKE2 v1.32.2+rke2r1..."
+
+# 1. Stage the images (same as master)
+mkdir -p /var/lib/rancher/rke2/agent/images/
+cp "${ARTIFACT_DIR}/rke2-images.linux-amd64.tar.zst" /var/lib/rancher/rke2/agent/images/
+
+# 2. Run the installer with TYPE="agent"
+INSTALL_RKE2_TYPE="agent" \
+INSTALL_RKE2_ARTIFACT_PATH=${ARTIFACT_DIR} \
+sh install.sh
+
+# 3. Create the Worker Configuration
+# Port 9345 is the fixed registration port for RKE2
+mkdir -p /etc/rancher/rke2/
+cat <<EOF > /etc/rancher/rke2/config.yaml
+server: https://${MASTER_IP}:9345
+token: ${CLUSTER_TOKEN}
+EOF
+
+# 4. Enable and Start the Agent Service
+systemctl daemon-reload
+systemctl enable rke2-agent.service
+systemctl start rke2-agent.service
+
+echo "Worker service started. It may take 2-5 minutes to extract images."
+echo "Monitor progress on the Master node with: 'kubectl get nodes -w'"
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Step5(optional): Want to add one more master ??
+run below script
+
+#!/bin/bash
+# Run as root inside the rke2-setup folder
+# Usage: sudo ./install-ha-master.sh <FIRST_MASTER_IP> <CLUSTER_TOKEN>
+
+FIRST_MASTER_IP=$1
+CLUSTER_TOKEN=$2
+
+if [ -z "$FIRST_MASTER_IP" ] || [ -z "$CLUSTER_TOKEN" ]; then
+    echo "Error: Missing arguments."
+    echo "Usage: sudo $0 192.168.1.10 K10234...::server:abc123"
+    exit 1
+fi
+
+ARTIFACT_DIR=$(pwd)
+
+echo "Joining this node as an additional Master..."
+
+# 1. Stage the images
+mkdir -p /var/lib/rancher/rke2/agent/images/
+cp "${ARTIFACT_DIR}/rke2-images.linux-amd64.tar.zst" /var/lib/rancher/rke2/agent/images/
+
+# 2. Run the installer as SERVER
+INSTALL_RKE2_TYPE="server" \
+INSTALL_RKE2_ARTIFACT_PATH=${ARTIFACT_DIR} \
+sh install.sh
+
+# 3. Create the HA Server Configuration
+mkdir -p /etc/rancher/rke2/
+cat <<EOF > /etc/rancher/rke2/config.yaml
+server: https://${FIRST_MASTER_IP}:9345
+token: ${CLUSTER_TOKEN}
+write-kubeconfig-mode: "0644"
+EOF
+
+# 4. Enable and Start the Server Service
+systemctl daemon-reload
+systemctl enable rke2-server.service
+systemctl start rke2-server.service
+
+echo "Additional Master is joining. Check progress: journalctl -u rke2-server -f"
+
+********************************************************************************************************************************************************************************************************************************************************************************
+common issue: 
+root@s-m1:~/rke2-setup# /var/lib/rancher/rke2/bin/kubectl get nodes E0216 08:21:03.172629 61601 memcache.go:265] "Unhandled Error" err="couldn't get current server API group list: Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+
+
+Why this happens
+
+By default kubectl looks for config in:
+
+~/.kube/config
+
+
+But RKE2 creates its config here:
+
+/etc/rancher/rke2/rke2.yaml
+
+
+So kubectl doesn’t know your cluster exists.
+
+Fix (very important step after RKE2 install)
+
+Run this:
+
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+Make it permanent
+
+Add to root profile:
+
+echo 'export KUBECONFIG=/etc/rancher/rke2/rke2.yaml' >> ~/.bashrc
+source ~/.bashrc
+
+********************************************************************************************************************************************************************************************************************************************************************************
+By default, Kubernetes does not automatically assign a "worker" role label to agent nodes. When you see <none> for ps-w1, it simply means the node is a pure worker with no special control-plane responsibilities.
+
+In Kubernetes, roles are just labels. The absence of a label doesn't mean the node isn't working; it just means it isn't a master/control-plane node.
+How to add the Worker role
+
+If you want your kubectl get nodes output to look "complete" by showing the worker role, you can manually label the node. Run this from your master node:
+Bash
+
+/var/lib/rancher/rke2/bin/kubectl label node ps-w1 kubernetes.io/role=worker
+
+Now when you run kubectl get nodes, it will display:
+ps-w1    Ready    worker    ...
+'
+********************************************************************************************************************************************************************************************************************************************************************************
+- What happens to the "Registration" IP?
+
+If M1 goes down:
+
+    Existing Workers: They will stay Ready. They will automatically failover to communicating with the APIs on M2 or M3. Your pods will keep running.
+
+    Rebooting a Worker: 'If a worker node reboots while M1 is down, it might struggle to "start up" initially because it will try to hit M1 (the IP in its config.yaml) to verify its identity.'
+
+    New Workers: You cannot join a new worker using the M1 IP if M1 is dead. You would have to use the M2 or M3 IP in your install script.
+
+- How to fix the "Single Point of Failure" without a Load Balancer
+
+'Since you dont have a hardware load balancer, you can make your workers more resilient by manually updating their configuration if M1 is going to be down for a long time.'
+
+On the Worker Node:
+
+    Edit the config: sudo vi /etc/rancher/rke2/config.yaml
+
+    Change server: https://<M1_IP>:9345 to server: https://<M2_IP>:9345.
+
+    Restart the agent: sudo systemctl restart rke2-agent
+'
+********************************************************************************************************************************************************************************************************************************************************************************
