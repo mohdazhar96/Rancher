@@ -1,0 +1,74 @@
+step1:
+
+run the below script on the server which has internet access
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#!/bin/bash
+# 1. SET VERSIONS
+RANCHER_VERSION="v2.13.1"
+CERT_MANAGER_VERSION="v1.14.5"
+
+# 2. DOWNLOAD RANCHER ASSETS
+wget https://github.com/rancher/rancher/releases/download/${RANCHER_VERSION}/rancher-images.txt
+wget https://github.com/rancher/rancher/releases/download/${RANCHER_VERSION}/rancher-save-images.sh
+chmod +x rancher-save-images.sh
+
+# 3. DOWNLOAD CERT-MANAGER ASSETS
+# Get the CRDs (This is the file your error was looking for!)
+wget https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.crds.yaml
+
+# Add cert-manager images to the Rancher list so they all go in one tarball
+helm repo add jetstack https://charts.jetstack.io
+helm repo update
+helm fetch jetstack/cert-manager --version ${CERT_MANAGER_VERSION}
+helm template ./cert-manager-${CERT_MANAGER_VERSION}.tgz | awk '$1 ~ /image:/ {print $2}' | sed 's/\"//g' >> ./rancher-images.txt
+
+# 4. FETCH HELM CHARTS
+helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
+helm fetch rancher-stable/rancher --version ${RANCHER_VERSION}
+
+# 5. SAVE ALL IMAGES (Rancher + Cert-Manager)
+./rancher-save-images.sh --image-list ./rancher-images.txt --output combined-images.tar.gz
+
+echo "Done! Transfer combined-images.tar.gz, both .tgz charts, and cert-manager.crds.yaml to your VM."
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+step2: copy all the file which generated from step1 to the isolated server 
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+step3: 
+# 1. INSTALL CERT-MANAGER CRDs (Fixes your "Issuer" error)
+kubectl apply -f cert-manager.crds.yaml
+
+# 2. INSTALL CERT-MANAGER CHART
+kubectl create namespace cert-manager
+helm install cert-manager ./cert-manager-v1.13.3.tgz \
+  --namespace cert-manager \
+  --set image.pullPolicy=IfNotPresent
+
+# 3. WAIT FOR CERT-MANAGER TO BE READY
+echo "Waiting for cert-manager pods..."
+kubectl wait --for=condition=Ready pods --all -n cert-manager --timeout=300s
+
+# 4. INSTALL RANCHER
+kubectl create namespace cattle-system
+helm install rancher ./rancher-*.tgz \
+  --namespace cattle-system \
+  --set hostname=rachertest.yourdomain.com \
+  --set rancherImagePullPolicy=IfNotPresent \
+  --set replicas=1 \
+  --set bootstrapPassword=admin
+
+echo "Rancher is installing. Visit https://rachertest.yourdomain.com in a few minutes."
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
