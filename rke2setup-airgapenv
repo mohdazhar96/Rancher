@@ -173,6 +173,15 @@ Add to root profile:
 echo 'export KUBECONFIG=/etc/rancher/rke2/rke2.yaml' >> ~/.bashrc
 source ~/.bashrc
 
+--------------------------------------------------------------------------------------
+set kubectl path
+
+echo 'export PATH=$PATH:/var/lib/rancher/rke2/bin' >> ~/.bashrc
+source ~/.bashrc
+
+---------------------------------------------------------------------------------------
+
+
 ********************************************************************************************************************************************************************************************************************************************************************************
 By default, Kubernetes does not automatically assign a "worker" role label to agent nodes. When you see <none> for ps-w1, it simply means the node is a pure worker with no special control-plane responsibilities.
 
