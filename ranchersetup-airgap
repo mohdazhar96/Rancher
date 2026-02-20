@@ -28,7 +28,10 @@ helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
 helm fetch rancher-stable/rancher --version ${RANCHER_VERSION}
 
 # 5. SAVE ALL IMAGES (Rancher + Cert-Manager)
-./rancher-save-images.sh --image-list ./rancher-images.txt --output combined-images.tar.gz
+#./rancher-save-images.sh --image-list ./rancher-images.txt --output combined-images.tar.gz
+./rancher-save-images.sh \
+  --image-list ./rancher-images.txt \
+  --images combined-images.tar.gz
 
 echo "Done! Transfer combined-images.tar.gz, both .tgz charts, and cert-manager.crds.yaml to your VM."
 
