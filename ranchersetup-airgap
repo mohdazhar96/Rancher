@@ -71,6 +71,24 @@ echo "Rancher is installing. Visit https://rachertest.yourdomain.com in a few mi
 
 
 
+Uploading cutom cert
+
+create
+Prepare files:
+Combine cert + chain if separate: cat yourdomain.crt intermediate.crt > tls.crt
+Have tls.key
+
+
+
+ kubectl -n cattle-system create secret tls tls-rancher-ingress \
+  --cert=tls.crt \
+  --key=tls.key
+
+
+
+helm upgrade rancher rancher-stable/rancher  --namespace cattle-system --set hostname=yourdomain.com --set rancherImagePullPolicy=IfNotPresent   --set ingress.tls.source=secret  --set replicas=5    --reuse-values
+
+  
 
 
 
